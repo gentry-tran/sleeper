@@ -1,0 +1,262 @@
+services:
+  # ---------------------------------------------------------------------------
+  # MQTT Broker -- entry point for injected telemetry
+  # ---------------------------------------------------------------------------
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    ports:
+      - "1884:1883"
+    volumes:
+      - ./infra/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -W 3 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Zookeeper -- required by Kafka
+  # ---------------------------------------------------------------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.3
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok,srvr,stat"
+    healthcheck:
+      test: ["CMD-SHELL", "echo srvr | nc localhost 2181 | grep -q 'Zookeeper version'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Kafka -- message bus between MQTT bridge and consumer
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.5.3
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9093:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # MQTT-to-Kafka bridge -- forwards MQTT messages to Kafka topic
+  # Uses a lightweight Python script with paho-mqtt + confluent-kafka
+  # ---------------------------------------------------------------------------
+  mqtt-kafka-bridge:
+    build:
+      context: ./consumer
+    entrypoint: ["python", "-u", "-c"]
+    command:
+      - |
+        import json, time, sys
+        import paho.mqtt.client as mqtt
+        from confluent_kafka import Producer
+
+        KAFKA_BOOTSTRAP = "kafka:29092"
+        KAFKA_TOPIC = "telemetry.events"
+        MQTT_HOST = "mosquitto"
+        MQTT_PORT = 1883
+
+        producer = None
+
+        def connect_kafka(retries=30, delay=2.0):
+            for attempt in range(1, retries + 1):
+                try:
+                    p = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP})
+                    print(f"[BRIDGE] Kafka producer ready on attempt {attempt}")
+                    return p
+                except Exception as exc:
+                    print(f"[BRIDGE] Kafka not ready (attempt {attempt}/{retries}): {exc}")
+                    time.sleep(delay)
+            print("[BRIDGE] Failed to connect to Kafka")
+            sys.exit(1)
+
+        def on_connect(client, userdata, flags, reason_code, properties):
+            print(f"[BRIDGE] Connected to MQTT broker (rc={reason_code})")
+            client.subscribe("iot/#", qos=1)
+            print("[BRIDGE] Subscribed to iot/#")
+
+        def on_message(client, userdata, msg):
+            global producer
+            try:
+                payload = msg.payload.decode("utf-8")
+                producer.produce(KAFKA_TOPIC, value=payload.encode("utf-8"),
+                                 key=msg.topic.encode("utf-8"))
+                producer.flush()
+                print(f"[BRIDGE] {msg.topic} -> {KAFKA_TOPIC} ({len(payload)} bytes)")
+            except Exception as exc:
+                print(f"[BRIDGE] Forward error: {exc}")
+
+        producer = connect_kafka()
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        client.on_connect = on_connect
+        client.on_message = on_message
+
+        for attempt in range(1, 31):
+            try:
+                client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
+                break
+            except Exception as exc:
+                print(f"[BRIDGE] MQTT not ready (attempt {attempt}/30): {exc}")
+                time.sleep(2)
+        else:
+            print("[BRIDGE] Failed to connect to MQTT")
+            sys.exit(1)
+
+        print("[BRIDGE] MQTT-to-Kafka bridge running")
+        client.loop_forever()
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"mosquitto\", 1883)); s.close()' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL -- stores telemetry data (including injected payloads)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: injection_lab
+      POSTGRES_USER: lab
+      POSTGRES_PASSWORD: lab
+    ports:
+      - "5434:5432"
+    volumes:
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lab -d injection_lab"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Kafka-to-Postgres consumer -- INTENTIONALLY NO SANITISATION
+  # ---------------------------------------------------------------------------
+  consumer:
+    build:
+      context: ./consumer
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC: telemetry.events
+      KAFKA_GROUP: telemetry-writer
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: injection_lab
+      DB_USER: lab
+      DB_PASSWORD: lab
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import psycopg2; psycopg2.connect(host=\"postgres\", dbname=\"injection_lab\", user=\"lab\", password=\"lab\").close()' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Ollama -- local LLM inference
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:11434/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Vulnerable LLM Agent -- NO defences (default)
+  # ---------------------------------------------------------------------------
+  vulnerable-agent:
+    build:
+      context: ./agent
+    command: ["python", "-u", "vulnerable_agent.py"]
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: injection_lab
+      DB_USER: lab
+      DB_PASSWORD: lab
+      OLLAMA_HOST: ollama
+      OLLAMA_PORT: "11434"
+      OLLAMA_MODEL: "llama3.2:1b"
+      CHECK_INTERVAL: "30"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import psycopg2; psycopg2.connect(host=\"postgres\", dbname=\"injection_lab\", user=\"lab\", password=\"lab\").close()' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Patched LLM Agent -- 3 defence layers (uncomment to compare)
+  # ---------------------------------------------------------------------------
+  # patched-agent:
+  #   build:
+  #     context: ./agent
+  #   command: ["python", "-u", "patched_agent.py"]
+  #   environment:
+  #     DB_HOST: postgres
+  #     DB_PORT: "5432"
+  #     DB_NAME: injection_lab
+  #     DB_USER: lab_readonly
+  #     DB_PASSWORD: lab_readonly
+  #     OLLAMA_HOST: ollama
+  #     OLLAMA_PORT: "11434"
+  #     OLLAMA_MODEL: "llama3.2:1b"
+  #     CHECK_INTERVAL: "30"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     ollama:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "python -c 'import psycopg2; psycopg2.connect(host=\"postgres\", dbname=\"injection_lab\", user=\"lab_readonly\", password=\"lab_readonly\").close()' || exit 1"]
+  #     interval: 15s
+  #     timeout: 5s
+  #     retries: 5
+  #     start_period: 30s
+
+volumes:
+  pgdata:
+  ollama_data:
