@@ -258,7 +258,7 @@ services:
   #     DB_PASSWORD: lab_readonly
   #     OLLAMA_HOST: ollama
   #     OLLAMA_PORT: "11434"
-  #     OLLAMA_MODEL: "llama3.2:1b"
+  #     OLLAMA_MODEL: "qwen2.5:0.5b"
   #     CHECK_INTERVAL: "30"
   #   depends_on:
   #     postgres:
