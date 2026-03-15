@@ -1,3 +1,5 @@
+name: sleeper-cell
+
 services:
   # ---------------------------------------------------------------------------
   # MQTT Broker -- entry point for injected telemetry
@@ -205,9 +207,11 @@ services:
   callback-listener:
     build:
       context: ./listener
-    container_name: injection-lab-callback
+    container_name: sleeper-cell-callback
     ports:
       - "9999:9999"
+    volumes:
+      - ./data:/data
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------

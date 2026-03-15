@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY config.py .
 COPY reporter.py .
-COPY inject_cli.py .
+COPY sleeper.py .
 COPY templates/ templates/
 
-ENTRYPOINT ["python", "-u", "inject_cli.py"]
+ENTRYPOINT ["python", "-u", "sleeper.py"]

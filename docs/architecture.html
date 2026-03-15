@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>IoT Prompt Injection — Attack Architecture</title>
+  <title>sleeper — Attack Architecture</title>
   <style>
     :root {
       --bg: #f4f1ec; --card: #faf8f5; --border: #e0dbd3;
@@ -24,9 +24,33 @@
     .legend { display: flex; gap: 1.5rem; justify-content: center; flex-wrap: wrap; font-size: 0.8rem; color: var(--dim); }
     .legend-item { display: flex; align-items: center; gap: 0.4rem; }
     .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+    .tldr { background: #2c2a26; color: #e4e6f0; padding: 1rem 1.5rem; border-radius: 8px; max-width: 1100px; margin: 0 auto 1.5rem; font-size: 0.85rem; line-height: 1.6; }
+    .tldr strong { color: #ff6b6b; }
+    .tldr code { background: #3a3830; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.8rem; }
+    .killchain { display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; margin: 1rem auto; max-width: 1100px; font-size: 0.75rem; }
+    .killchain-step { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 0.8rem; }
+    .killchain-step .num { color: var(--red); font-weight: 700; }
+    .killchain-arrow { color: var(--dim); align-self: center; }
   </style>
 </head>
 <body>
+  <div class="tldr">
+    <strong>sleeper</strong> — Wrapper around Eclipse Mosquitto that turns an MQTT broker into a prompt injection delivery system.
+    Poison sensor data via MQTT, it flows untouched through Kafka → Postgres → LLM agent.
+    The agent follows injected instructions, executes SQL, and phones home extracted data to your callback listener.
+    <strong>You cannot extract data without a phone-home channel</strong> — blind SQL through a prompt injection is a dead end.
+  </div>
+
+  <div class="killchain">
+    <div class="killchain-step"><span class="num">1</span> <code>fire canary</code> — confirm outbound HTTP</div>
+    <div class="killchain-arrow">→</div>
+    <div class="killchain-step"><span class="num">2</span> <code>fire recon</code> — discover schema</div>
+    <div class="killchain-arrow">→</div>
+    <div class="killchain-step"><span class="num">3</span> <code>fire phone-home</code> — extract to listener</div>
+    <div class="killchain-arrow">→</div>
+    <div class="killchain-step"><span class="num">4</span> <code>listen check</code> — collect exfiltrated data</div>
+  </div>
+
   <h1>IoT Stored Prompt Injection — Attack Chain</h1>
   <p class="subtitle">The data IS the attack. The payload hides in a normal telemetry field.</p>
 
@@ -115,11 +139,13 @@
       <line x1="860" y1="400" x2="950" y2="400" stroke="#2a9b5a" stroke-width="1.5" opacity="0.5" stroke-dasharray="5,3" marker-end="url(#ahg)"/>
       <text x="900" y="390" fill="#2a9b5a" font-size="7" opacity="0.7">HTTP GET</text>
 
-      <!-- ── Callback listener ── -->
-      <rect x="955" y="370" width="80" height="60" rx="8" fill="#faf8f5" stroke="#2a9b5a" stroke-width="1.5"/>
-      <text x="995" y="395" text-anchor="middle" fill="#2a9b5a" font-size="10" font-weight="600">Callback</text>
-      <text x="995" y="410" text-anchor="middle" fill="#8a8580" font-size="7">Listener</text>
-      <text x="995" y="422" text-anchor="middle" fill="#8a8580" font-size="7">:9999</text>
+      <!-- ── Callback listener (persistent) ── -->
+      <rect x="940" y="360" width="105" height="80" rx="8" fill="#faf8f5" stroke="#2a9b5a" stroke-width="1.5"/>
+      <text x="992" y="382" text-anchor="middle" fill="#2a9b5a" font-size="10" font-weight="600">Callback</text>
+      <text x="992" y="396" text-anchor="middle" fill="#2a9b5a" font-size="10" font-weight="600">Listener</text>
+      <text x="992" y="412" text-anchor="middle" fill="#8a8580" font-size="7">:9999 — SQLite-backed</text>
+      <text x="992" y="425" text-anchor="middle" fill="#8a8580" font-size="7">Runs for hours/days/weeks</text>
+      <text x="992" y="436" text-anchor="middle" fill="#2a9b5a" font-size="7" font-weight="600">./data/callbacks.db</text>
 
       <!-- ── "The data IS the attack" label ── -->
       <rect x="30" y="350" width="220" height="80" rx="8" fill="#faf8f5" stroke="#d94f4f" stroke-width="1" stroke-dasharray="4,3"/>
