@@ -30,7 +30,7 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "ollama")
 OLLAMA_PORT = os.environ.get("OLLAMA_PORT", "11434")
 OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/chat"
 OLLAMA_PULL_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/pull"
-MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
+MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:0.5b")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "30"))
 
 # Defense layer 2: system prompt that constrains LLM behaviour
