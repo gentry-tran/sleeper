@@ -8,6 +8,7 @@ DB tool access being tricked by stored prompt injection.
 
 INTENTIONALLY VULNERABLE:
   - Extracts and executes SQL from LLM responses
+  - Has send_notification tool (HTTP POST) — enables phone-home exfiltration
   - Telemetry data sent unsanitised to the LLM
   - No guardrails
   - DB user has full read access including flags table
@@ -30,6 +31,9 @@ DB_DSN = (
     f"password={os.environ.get('DB_PASSWORD', 'lab')}"
 )
 
+CALLBACK_HOST = os.environ.get("CALLBACK_HOST", "callback-listener")
+CALLBACK_PORT = os.environ.get("CALLBACK_PORT", "9999")
+
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "ollama")
 OLLAMA_PORT = os.environ.get("OLLAMA_PORT", "11434")
 OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/chat"
@@ -37,8 +41,9 @@ OLLAMA_PULL_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/pull"
 MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "30"))
 
-# Pattern to extract SQL from LLM output
-SQL_PATTERN = re.compile(r"(?:Execute|SELECT|query)[\s:]*\b(SELECT\s+.+?)(?:\s+and\s+include|\s*;|\s*$)", re.IGNORECASE | re.DOTALL)
+# Patterns to extract SQL and URLs from LLM output
+SQL_PATTERN = re.compile(r"\b(SELECT\s+\w+\s+FROM\s+\w+(?:\s+LIMIT\s+\d+)?(?:\s+WHERE\s+\w+\s*[=<>]+\s*\S+)?)", re.IGNORECASE)
+URL_PATTERN = re.compile(r"(?:GET|POST|send|fetch|curl|request|notify)\s+(https?://[^\s\"'<>]+)", re.IGNORECASE)
 
 
 def wait_for_postgres(retries: int = 30, delay: float = 2.0):
@@ -99,11 +104,23 @@ def execute_sql(sql: str) -> str:
         return f"SQL error: {exc}"
 
 
+def send_notification(url: str, data: str = "") -> str:
+    """Send an HTTP request — the agent's 'alert/webhook' capability."""
+    try:
+        if data:
+            resp = requests.post(url, data=data, timeout=5)
+        else:
+            resp = requests.get(url, timeout=5)
+        return f"HTTP {resp.status_code}: {resp.text[:200]}"
+    except Exception as exc:
+        return f"HTTP error: {exc}"
+
+
 def ask_llm(messages: list[dict]) -> str:
     resp = requests.post(
         OLLAMA_URL,
         json={"model": MODEL, "messages": messages, "stream": False},
-        timeout=120,
+        timeout=600,
     )
     resp.raise_for_status()
     return resp.json()["message"]["content"]
@@ -192,8 +209,20 @@ def run_agent_loop(rows: list[tuple]):
             if "FLAG{" in response2:
                 flag_found = True
 
+    # Check for phone-home URLs in LLM output
+    all_responses = [response] + ([response2] if 'response2' in locals() else [])
+    for resp_text in all_responses:
+        url_matches = URL_PATTERN.findall(resp_text)
+        # Also catch raw http:// URLs
+        raw_urls = re.findall(r"(https?://callback[^\s\"'<>]+)", resp_text, re.IGNORECASE)
+        url_matches.extend(raw_urls)
+        for url in set(url_matches):
+            print(f"\n[AGENT] >>> PHONE-HOME: sending request to {url}")
+            result = send_notification(url)
+            print(f"[AGENT] <<< Response: {result}")
+
     # Also check if FLAG leaked in any response
-    for text in [response, *([response2] if 'response2' in dir() else [])]:
+    for text in all_responses:
         if "FLAG{" in text and not flag_found:
             flag_found = True
 
