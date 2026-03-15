@@ -15,7 +15,7 @@ from datetime import datetime
 FLAG_PATTERN = re.compile(r"FLAG\{[^}]+\}")
 
 
-def watch_logs(container_name: str = "mqtt-injection-lab-vulnerable-agent-1",
+def watch_logs(container_name: str = "sleeper-cell-vulnerable-agent-1",
                timeout: int = 0):
     """Stream Docker logs and watch for FLAG pattern.
 
